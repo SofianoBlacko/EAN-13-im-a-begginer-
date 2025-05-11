@@ -1,0 +1,195 @@
+#after generating the barcode EAN-13 in correct way this one will help you to print it ofc if you  are using Windows.
+#as youcan see im using Json file to save changes and even generate it when lunched
+#the import EAN13_GUARD i did not find it at all in documentations or i was reading old one it took me 2 weeks of reaserch+ tests to get this perfected from generating calculating to printing so the EAN13_GUAR let your barcode be generated with GUARD like you see it in the products
+
+import os
+import json
+import tempfile
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+from barcode import EAN13_GUARD
+from barcode.writer import ImageWriter
+import win32print
+
+def load_label_config(config_path="label_config.json"):
+    """
+    Load label configuration from a JSON file or return default settings.
+    
+    Args:
+        config_path (str): Path to the config file.
+    Returns:
+        dict: Configuration settings.
+    """
+    default_config = {
+        "label_width_mm": 40.0,      # 2 inches
+        "label_height_mm": 20.0,     # 1 inch
+        "printer_dpi": 203,          # Default DPI (203 or 300)
+        "barcode_width_mm": 48,      # Barcode width
+        "barcode_height_mm": 12,     # Barcode height
+        "font_size_name": 20,        # Font size for item name
+        "font_size_price": 20,       # Font size for price
+        "margin_mm": 1,              # Margin on all sides
+    }
+    
+    try:
+        if os.path.exists(config_path):
+            print(f"Program is touching the file: Reading from {config_path}")
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            # Ensure all required keys are present
+            for key, value in default_config.items():
+                if key not in config:
+                    config[key] = value
+            print(f"Loaded config: {config}")
+            return config
+        else:
+            print(f"Program is touching the file: Creating {config_path} with default config")
+            with open(config_path, 'w') as f:
+                json.dump(default_config, f, indent=4)
+            print(f"Created config: {default_config}")
+            return default_config
+    except Exception as e:
+        print(f"Failed to load label config: {str(e)}. Using default config.")
+        return default_config
+
+def mm_to_pixels(mm, dpi):
+    """
+    Convert millimeters to pixels based on DPI.
+    
+    Args:
+        mm (float): Size in millimeters.
+        dpi (int): Dots per inch.
+    Returns:
+        int: Size in pixels.
+    """
+    inches = mm / 25.4
+    return int(inches * dpi)
+
+def generate_label_image(item_id, item_name, price, barcode_value, currency_symbol, config):
+    """
+    Generate label image with EAN13_GUARD barcode (renders exact string without recalculation).
+    
+    Args:
+        item_id (int): Item ID.
+        item_name (str): Name of the item.
+        price (float): Price of the item.
+        barcode_value (str): Barcode string (e.g., 13 digits).
+        currency_symbol (str): Currency symbol (e.g., "DA").
+        config (dict): Label configuration.
+    Returns:
+        str: Path to the generated temporary image file.
+    Raises:
+        Exception: If image generation fails.
+    """
+    try:
+        config = load_label_config(config_path="label_config.json")
+        # Validate barcode
+        if not barcode_value or not barcode_value.isdigit() or len(barcode_value) != 13:
+            raise ValueError(f"Invalid barcode for item {item_id}: '{barcode_value}'. Must be a 13-digit barcode.")
+        
+        print(f"Input barcode value for item {item_id}: {barcode_value}")
+
+        # Setup dimensions
+        dpi = config["printer_dpi"]
+        label_w = mm_to_pixels(config["label_width_mm"], dpi)
+        label_h = mm_to_pixels(config["label_height_mm"], dpi)
+        margin = mm_to_pixels(config["margin_mm"], dpi)
+        barcode_width_px = mm_to_pixels(config["barcode_width_mm"], dpi)
+        barcode_height_px = mm_to_pixels(config["barcode_height_mm"], dpi)
+
+        # Create blank image
+        img = Image.new("RGB", (label_w, label_h), "white")
+        draw = ImageDraw.Draw(img)
+
+        # Load fonts (fallback to default)
+        try:
+            font_name = ImageFont.truetype("arial.ttf", config["font_size_name"])
+            font_price = ImageFont.truetype("arial.ttf", config["font_size_price"])
+        except:
+            font_name = font_price = ImageFont.load_default()
+
+        # --- 1. Draw Item Name ---
+        name_bbox = draw.textbbox((0, 0), item_name, font=font_name)
+        name_x = (label_w - (name_bbox[2] - name_bbox[0])) // 2
+        draw.text((name_x, margin), item_name, fill="black", font=font_name)
+
+        # --- 2. Draw Barcode (EAN13_GUARD) ---
+        writer = ImageWriter()
+        writer.set_options({
+            "module_width": 0.3,      # Slightly reduced for EAN13_GUARD (denser than EAN13)
+            "write_text": False,      # Disable auto-text
+        })
+        
+        # Use EAN13_GUARD to render the exact barcode string
+        code = EAN13_GUARD(barcode_value, writer=writer)
+        barcode_temp_path = os.path.join(tempfile.gettempdir(), f"barcode_{item_id}")
+        code.save(barcode_temp_path)
+        
+        barcode_img = Image.open(barcode_temp_path + ".png")
+        barcode_img = barcode_img.resize(
+            (barcode_width_px, barcode_height_px),
+            Image.Resampling.LANCZOS
+        )
+        
+        barcode_x = (label_w - barcode_img.width) // 2
+        barcode_y = (label_h - barcode_img.height) // 2
+        img.paste(barcode_img, (barcode_x, barcode_y))
+        
+        # Debug: Save the barcode image for inspection
+        barcode_img.save(f"barcode_{item_id}_debug.png")
+        print(f"Saved barcode image for inspection: barcode_{item_id}_debug.png")
+        
+        os.remove(barcode_temp_path + ".png")
+
+        # --- 3. Draw Price ---
+        price_text = f"{price:.2f}{currency_symbol}"
+        price_bbox = draw.textbbox((0, 0), price_text, font=font_price)
+        price_x = (label_w - (price_bbox[2] - price_bbox[0])) // 2
+        # Position price 1mm (gap_mm) below the barcode
+        gap_mm = 0  # Desired gap between barcode and price
+        gap_px = mm_to_pixels(gap_mm, dpi)
+        price_y = barcode_y + barcode_img.height + gap_px
+        draw.text((price_x, price_y), price_text, fill="black", font=font_price)
+
+        # Save to temp file
+        label_path = os.path.join(tempfile.gettempdir(), f"label_{item_id}.png")
+        img.save(label_path, "PNG")
+        return label_path
+
+    except Exception as e:
+        raise Exception(f"Label generation failed: {str(e)}")
+
+def print_label(image_path, printer_name=None, config=None):
+    """
+    Print the label image using the Windows print spooler.
+    
+    Args:
+        image_path (str): Path to the image file to print.
+        printer_name (str, optional): Name of the printer to use. If None, uses default printer.
+        config (dict, optional): Label configuration to get the image DPI.
+    Raises:
+        Exception: If printing fails.
+    """
+    try:
+        if not os.path.exists(image_path):
+            raise Exception(f"Image file not found: {image_path}")
+
+        if printer_name is None:
+            printer_name = win32print.GetDefaultPrinter()
+        print(f"Printing to printer: {printer_name}")
+
+        win32print.SetDefaultPrinter(printer_name)
+
+        # Open and close the image file to log dimensions
+        with Image.open(image_path) as bmp:
+            bmp_width, bmp_height = bmp.size
+            print(f"Image dimensions: {bmp_width}x{bmp_height} pixels")
+        print(f"Image dimensions: {bmp_width}x{bmp_height} pixels")
+
+        os.startfile(image_path, "print")
+
+        # Do not delete the file immediately; leave it for manual inspection
+        print(f"Temporary label file saved at: {image_path}")
+
+    except Exception as e:
+        raise Exception(f"Failed to print label: {str(e)}")
